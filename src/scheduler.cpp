@@ -1,6 +1,8 @@
+// Modified by WhiteCloudOL to preserve FIFO order and cancel disconnected waiters.
 #include "breeze/scheduler.h"
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace breeze {
 
@@ -8,12 +10,21 @@ void GenScheduler::start(BreezeModel & m, int parallel) {
     stop();
     m_model = &m;
     m_parallel = parallel < 1 ? 1 : parallel;
-    m_slots = m_parallel;
+    {
+        std::lock_guard<std::mutex> lock(m_slot_mu);
+        m_slots = m_parallel;
+        m_slots_stopped = false;
+    }
     m_stop = false;
     m_thread = std::thread([this] { loop(); });
 }
 
 void GenScheduler::stop() {
+    {
+        std::lock_guard<std::mutex> lock(m_slot_mu);
+        m_slots_stopped = true;
+    }
+    m_slot_cv.notify_all();
     if (m_thread.joinable()) {
         {
             std::lock_guard<std::mutex> lock(m_mu);
@@ -27,15 +38,41 @@ void GenScheduler::stop() {
 
 bool GenScheduler::try_acquire(int n) {
     std::lock_guard<std::mutex> lock(m_slot_mu);
-    if (m_slots < n) return false;
+    if (n < 1 || n > m_parallel) throw std::invalid_argument("invalid slot count");
+    if (m_slots_stopped || !m_slot_waiters.empty() || m_slots < n) return false;
     m_slots -= n;
     return true;
 }
 
-void GenScheduler::acquire(int n) {
+bool GenScheduler::acquire(int n, const std::function<bool()> & cancelled) {
     std::unique_lock<std::mutex> lock(m_slot_mu);
-    m_slot_cv.wait(lock, [&] { return m_slots >= n; });
-    m_slots -= n;
+    if (n < 1 || n > m_parallel) throw std::invalid_argument("invalid slot count");
+    const auto position = m_slot_waiters.insert(m_slot_waiters.end(), n);
+    try {
+        for (;;) {
+            if (m_slots_stopped || (cancelled && cancelled())) {
+                m_slot_waiters.erase(position);
+                m_slot_cv.notify_all();
+                return false;
+            }
+            if (m_slot_waiters.begin() == position && m_slots >= n) {
+                m_slot_waiters.erase(position);
+                m_slots -= n;
+                m_slot_cv.notify_all();
+                return true;
+            }
+            m_slot_cv.wait_for(lock, std::chrono::milliseconds(100));
+        }
+    } catch (...) {
+        m_slot_waiters.erase(position);
+        m_slot_cv.notify_all();
+        throw;
+    }
+}
+
+GenScheduler::QueueStatus GenScheduler::queue_status() {
+    std::lock_guard<std::mutex> lock(m_slot_mu);
+    return {m_parallel - m_slots, m_slot_waiters.size(), m_parallel};
 }
 
 void GenScheduler::release(int n) {

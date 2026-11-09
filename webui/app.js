@@ -1,3 +1,19 @@
+// Modified by WhiteCloudOL to authenticate API requests and WebSocket upgrades.
+const apiKeyInput = document.getElementById("api-key");
+
+function apiFetch(path, options = {}) {
+  const headers = new Headers(options.headers);
+  const key = apiKeyInput.value.trim();
+  if (key) headers.set("Authorization", "Bearer " + key);
+  return fetch(path, { ...options, headers });
+}
+
+apiKeyInput.addEventListener("change", () => {
+  wsPort = 0;
+  loadHealth();
+  loadVoices();
+});
+
 const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 const statusEl = document.getElementById("status");
@@ -55,7 +71,7 @@ function syncVoice(panel) {
 async function loadVoices() {
   let list = [];
   try {
-    const res = await fetch("/v1/voices");
+    const res = await apiFetch("/v1/voices");
     if (res.ok) list = await res.json();
   } catch (e) { return; }
   voices = list;
@@ -97,7 +113,7 @@ async function saveVoice(panel) {
     form.append("ref_text", f.ref_text.value);
     const desc = (f.save_desc.value || "").trim();
     if (desc) form.append("description", desc);
-    const res = await fetch("/v1/voices", { method: "POST", body: form });
+    const res = await apiFetch("/v1/voices", { method: "POST", body: form });
     const body = await res.json();
     if (!res.ok) {
       statusEl.textContent = res.status === 409 ? "BUSY - ONE REQUEST AT A TIME"
@@ -254,7 +270,7 @@ async function resolveVoice(f) {
   const form = new FormData();
   form.append("ref_audio", f.ref_audio.files[0]);
   form.append("ref_text", f.ref_text ? f.ref_text.value || "" : "");
-  const r = await fetch("/v1/voices", { method: "POST", body: form });
+  const r = await apiFetch("/v1/voices", { method: "POST", body: form });
   if (!r.ok) throw new Error("could not encode the reference");
   return (await r.json()).id;
 }
@@ -273,7 +289,9 @@ function wsGenerate(panel, tabName) {
   return resolveVoice(f).then(voice => new Promise(resolve => {
     const url = (location.protocol === "https:" ? "wss://" : "ws://") +
                 location.hostname + ":" + wsPort;
-    const sock = new WebSocket(url);
+    const key = apiKeyInput.value.trim();
+    const protocol = key ? "breeze-api-key." + btoa(key).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "") : "";
+    const sock = protocol ? new WebSocket(url, protocol) : new WebSocket(url);
     sock.binaryType = "arraybuffer";
     liveSocket = sock;
     btn.disabled = true;
@@ -371,7 +389,7 @@ async function generate(panel, tabName) {
   player.removeAttribute("src");
 
   try {
-    const res = await fetch("/v1/audio/speech", { method: "POST", body: form });
+    const res = await apiFetch("/v1/audio/speech", { method: "POST", body: form });
     if (!res.ok) {
       statusEl.textContent = res.status === 409 ? "BUSY - ONE REQUEST AT A TIME" : "ERROR " + res.status;
       btn.disabled = false;
@@ -433,7 +451,7 @@ async function convert(panel) {
   player.removeAttribute("src");
 
   try {
-    const res = await fetch("/v1/audio/convert", { method: "POST", body: form });
+    const res = await apiFetch("/v1/audio/convert", { method: "POST", body: form });
     if (!res.ok) {
       statusEl.textContent = res.status === 409 ? "BUSY - ONE REQUEST AT A TIME" : "ERROR " + res.status;
       btn.disabled = false;
@@ -600,7 +618,7 @@ function voiceCard(v) {
     status.classList.remove("err");
     status.textContent = "saving ...";
     try {
-      const res = await fetch("/v1/voices/" + encodeURIComponent(v.id), {
+      const res = await apiFetch("/v1/voices/" + encodeURIComponent(v.id), {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ description: c.description, metadata })
@@ -647,7 +665,7 @@ document.getElementById("librefresh").addEventListener("click", loadVoices);
 
 async function loadHealth() {
   try {
-    const r = await fetch("/health");
+    const r = await apiFetch("/health");
     if (r.ok) wsPort = (await r.json()).ws_port || 0;
   } catch (e) { wsPort = 0; }
 }

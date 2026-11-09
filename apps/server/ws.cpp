@@ -1,7 +1,9 @@
+// Modified by WhiteCloudOL to authenticate WebSocket upgrade requests.
 #include "ws.h"
 
 #include <cstdio>
 #include <cstring>
+#include <sstream>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -166,7 +168,7 @@ bool WsConn::recv(std::string & out, bool & binary) {
 
 WsServer::~WsServer() { stop(); }
 
-bool WsServer::start(const std::string & host, int port, Handler h) {
+bool WsServer::start(const std::string & host, int port, Handler h, const BearerAuth & auth) {
 #ifdef _WIN32
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -187,6 +189,7 @@ bool WsServer::start(const std::string & host, int port, Handler h) {
     }
     m_listen = (uint64_t) s;
     m_handler = std::move(h);
+    m_auth = auth;
     m_running = true;
     m_thread = std::thread([this] { accept_loop(); });
     return true;
@@ -199,13 +202,32 @@ void WsServer::stop() {
 }
 
 // reads the upgrade request and answers it, leaving the socket talking websocket
-static bool handshake(SOCKET s) {
+static bool handshake(SOCKET s, const BearerAuth & auth) {
     std::string req;
     char buf[1024];
     while (req.find("\r\n\r\n") == std::string::npos) {
         const int got = ::recv(s, buf, sizeof buf, 0);
-        if (got <= 0 || req.size() > 16384) return false;
+        if (got <= 0 || req.size() + (size_t) got > 16384) return false;
         req.append(buf, (size_t) got);
+    }
+    std::vector<std::string> credentials, protocols;
+    std::istringstream headers(req.substr(0, req.find("\r\n\r\n")));
+    std::string line;
+    std::getline(headers, line); // skip the HTTP request line
+    while (std::getline(headers, line)) {
+        const size_t colon = line.find(':');
+        if (colon == std::string::npos) continue;
+        std::string name = line.substr(0, colon);
+        for (char & c : name) c = (char) tolower((unsigned char) c);
+        if (name == "authorization") credentials.push_back(line.substr(colon + 1));
+        if (name == "sec-websocket-protocol") protocols.push_back(line.substr(colon + 1));
+    }
+    std::string selected_protocol;
+    if (!auth.accepts_websocket(credentials, protocols, selected_protocol)) {
+        const char * denied = "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer\r\n"
+                              "Content-Length: 0\r\nConnection: close\r\n\r\n";
+        ::send(s, denied, (int) strlen(denied), 0);
+        return false;
     }
     // header names are case insensitive, and browsers do not agree on the casing
     std::string lower = req;
@@ -222,7 +244,9 @@ static bool handshake(SOCKET s) {
 
     const std::string res = "HTTP/1.1 101 Switching Protocols\r\n"
                             "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-                            "Sec-WebSocket-Accept: " + base64(digest, 20) + "\r\n\r\n";
+                            "Sec-WebSocket-Accept: " + base64(digest, 20) + "\r\n" +
+                            (selected_protocol.empty() ? "" : "Sec-WebSocket-Protocol: " + selected_protocol + "\r\n") +
+                            "\r\n";
     return ::send(s, res.data(), (int) res.size(), 0) == (int) res.size();
 }
 
@@ -235,7 +259,7 @@ void WsServer::accept_loop() {
         int yes = 1;
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char *) &yes, sizeof yes);
         std::thread([this, c] {
-            if (handshake(c)) {
+            if (handshake(c, m_auth)) {
                 WsConn conn((uint64_t) c);
                 m_handler(conn);
             } else {

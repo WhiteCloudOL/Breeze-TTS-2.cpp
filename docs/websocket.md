@@ -1,3 +1,4 @@
+<!-- Modified by WhiteCloudOL to document authenticated WebSocket upgrades. -->
 # WebSocket API
 
 The HTTP endpoint already streams audio and already stops generating when the
@@ -122,9 +123,9 @@ The session stays open. Send more text and it carries on with the same voice.
 ## Concurrency
 
 The server generates as many streams at once as its `--parallel` setting allows,
-one by default, and a session using guidance counts as two. Unlike the HTTP
-endpoints, which answer `409` when full, a socket session **waits its turn** and
-reports `queued` while it does. Each piece takes its slots separately, so connections
+one by default, and a session using guidance counts as two in parallel mode.
+HTTP requests and socket pieces share a FIFO queue. A socket session reports
+`queued` while it waits. Each piece takes its slots separately, so connections
 interleave between pieces instead of one blocking the others for an entire passage.
 See [performance.md](performance.md#running-several-streams).
 
@@ -133,10 +134,11 @@ Each connection reads and generates on separate threads, which is what lets
 
 ## Security
 
-There is no authentication, no origin check and no rate limit on the socket. It
-binds to `--host`, which defaults to `127.0.0.1`. Binding it to `0.0.0.0` hands
-anyone on the network unrestricted use of the GPU. Put it behind a reverse proxy
-that terminates TLS and handles auth before exposing it.
+With `--auth`, the upgrade requires `Authorization: Bearer <KEY>`.
+Browser clients can instead offer `breeze-api-key.` followed by the key encoded
+with unpadded base64url as their WebSocket subprotocol. The built-in WebUI handles
+this after a key is entered. Invalid or missing credentials receive HTTP 401
+before the upgrade. See [Windows deployment](windows-auth.md).
 
 ## Client sketch
 

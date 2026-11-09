@@ -1,6 +1,9 @@
 <div align="center">
 
+<!-- Modified by WhiteCloudOL to document Windows CUDA and multi-key authentication. -->
 # Breeze-TTS-2.cpp
+
+Windows Q8 CUDA deployment with multi-key HTTP/WebSocket authentication is documented in [docs/windows-auth.md](docs/windows-auth.md).
 
 **Bilingual instruction following text to speech in C++ and GGUF.**
 Voice design, voice cloning, voice direction and experimental voice conversion,
@@ -84,7 +87,8 @@ streams with guidance. Five streams at Q8_0 run at 1.46x to 1.68x each with no g
 [docs/performance.md](docs/performance.md#several-streams-on-an-rtx-3080).
 
 A stream using guidance counts as two, so `--parallel 4` fits any of these except the last one. When
-every slot is taken, the HTTP routes answer `409` and a WebSocket session waits its turn.
+every slot is taken, HTTP requests and WebSocket pieces wait in one FIFO queue.
+Concurrency still follows `--parallel`, and disconnected waiters are removed.
 
 ### Tuning
 
@@ -196,7 +200,8 @@ All options, the state-dir layout and the operational details: [nix/README.md](n
 
 Prebuilt GGUFs are on the Hub at
 [HoppouAI/Breeze-TTS-2.cpp](https://huggingface.co/HoppouAI/Breeze-TTS-2.cpp), or convert them
-yourself. The download must include the `audio_tokenizer/` directory, which holds the vocoder.
+yourself. The GGUF includes the vocoder. Converting original checkpoints requires
+their `audio_tokenizer/` directory.
 
 ```
 pip install -r scripts/requirements.txt
@@ -332,8 +337,8 @@ OpenAI compatible chat server for the replies. You can share your screen in a ca
 character can see it, with a chat model that takes images. See
 [docs/server.md](docs/server.md#voice-call-demo).
 
-> **Neither port has authentication or rate limiting.** Keep them bound to `127.0.0.1` unless something
-> in front of them is handling that.
+Use `--auth` to protect both listeners with API keys. The Windows auth launcher
+configures this automatically. See [Windows deployment](docs/windows-auth.md).
 
 ## MCP server
 

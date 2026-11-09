@@ -1,3 +1,4 @@
+// Modified by WhiteCloudOL to cancel FIFO waits on disconnect and release slots safely.
 #include "ws_api.h"
 #include "json.h"
 
@@ -93,7 +94,7 @@ struct Session {
     int cost = 1;
     bool started = false;
     bool ending = false;
-    bool quit = false;
+    std::atomic<bool> quit{false};
     bool speaking = false;
     std::atomic<bool> cancel{false};
 };
@@ -108,6 +109,7 @@ static void event(WsConn & c, const std::string & type, const std::string & extr
 static void speaker(WsConn & conn, Session & s, GenScheduler & sched) {
     for (;;) {
         Piece piece;
+        int cost = 1;
         {
             std::unique_lock<std::mutex> lock(s.mu);
             s.speaking = false;
@@ -123,14 +125,21 @@ static void speaker(WsConn & conn, Session & s, GenScheduler & sched) {
             piece = std::move(s.queue.front());
             s.queue.pop_front();
             s.speaking = true;
+            cost = s.cost;
         }
         if (s.cancel) { s.cancel = false; continue; }
 
-        if (!sched.try_acquire(s.cost)) {
+        if (!sched.try_acquire(cost)) {
             event(conn, "queued");
-            sched.acquire(s.cost);
+            if (!sched.acquire(cost, [&] { return s.cancel || s.quit || !conn.alive(); })) {
+                if (s.quit || !conn.alive()) return;
+                s.cancel = false;
+                event(conn, "cancelled");
+                continue;
+            }
         }
-        if (s.cancel) { sched.release(s.cost); s.cancel = false; continue; }
+        SlotHold slot(sched, cost);
+        if (s.cancel || s.quit) { s.cancel = false; continue; }
 
         {
             std::lock_guard<std::mutex> lock(s.mu);
@@ -145,7 +154,6 @@ static void speaker(WsConn & conn, Session & s, GenScheduler & sched) {
             sent += n;
             return conn.send_binary(pcm.data(), pcm.size());
         });
-        sched.release(s.cost);
 
         if (s.cancel) { event(conn, "cancelled"); s.cancel = false; continue; }
         if (!ok && !conn.alive()) return;

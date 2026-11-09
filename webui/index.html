@@ -1,3 +1,4 @@
+<!-- Modified by WhiteCloudOL to accept a Bearer API key in the WebUI. -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -21,6 +22,9 @@
 </nav>
 
 <main>
+  <label>API KEY
+    <input id="api-key" type="password" autocomplete="off" placeholder="Enter one configured key, then press Tab" />
+  </label>
   <section class="panel active" id="design">
     <label>TEXT TO SPEAK
       <textarea data-f="text" rows="3" placeholder="Welcome aboard. Your journey begins now."></textarea>

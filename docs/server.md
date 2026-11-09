@@ -1,3 +1,4 @@
+<!-- Modified by WhiteCloudOL to document optional multi-key authentication. -->
 # Server API
 
 `breeze-server` is a single binary HTTP server built on cpp-httplib. It loads
@@ -81,9 +82,11 @@ and anything above `1.00x` is faster than playback.
 With `--parallel` above 1 the moving bar is left out, because several streams would
 write over each other. The final bar and the summary still print for each request.
 
-There is no authentication and no rate limiting, on either the HTTP port or the
-WebSocket one. Do not expose them directly to the internet; put them behind a
-reverse proxy that handles both.
+Pass `--auth` to require Bearer API keys on both HTTP and WebSocket requests.
+Keys come from `BREEZE_API_KEYS` (comma-separated), `BREEZE_API_KEY`, or
+`--api-key-file PATH` (one key per line, default `.env.api-key`).
+The Windows auth launcher enables this automatically. See
+[Windows deployment](windows-auth.md) for configuration and browser authentication.
 
 ## Cross origin requests
 
@@ -310,14 +313,15 @@ long before generation finishes.
 | --- | --- | --- |
 | `400` | `{"error":"text is required"}` | `text` missing or empty. |
 | `404` | `{"error":"unknown voice_id"}` | No cached or saved voice by that name. |
-| `409` | `{"error":"busy"}` | Every generation slot is taken. |
+| `401` | `{"detail":"Invalid or missing API key."}` | Auth mode requires a valid Bearer key. |
 
 The server holds one model and by default serves one request at a time. `--parallel`
 raises that, and a request using guidance takes two slots, see
-[performance.md](performance.md#running-several-streams). A request that does not
-fit is rejected immediately with `409` rather than queued, so clients should retry
-with backoff. The WebSocket endpoint queues instead of refusing, which is one reason
-to prefer it for anything conversational.
+[performance.md](performance.md#running-several-streams). Requests wait in a shared
+FIFO queue when all slots are taken. The same ordering applies with one slot or
+multiple slots. A later small request waits behind a larger request at the head.
+Disconnected requests are removed from the waiting queue.
+`GET /v1/queue` reports occupied slots, waiting requests and configured capacity.
 
 Because the response is streamed, a failure that happens **after** the first
 chunk cannot change the status code. The connection is closed early instead, so
@@ -472,10 +476,10 @@ instead of a bare status code.
 | --- | --- |
 | `400` | The body is not a JSON object, `input` is missing, or a field has the wrong type or an unknown value. |
 | `404` | `voice` is not a saved or cached voice. |
-| `409` | Every generation slot is taken. The OpenAI SDKs retry this on their own. |
+| `401` | Auth mode requires a valid Bearer key. |
 
-The `Authorization` header is ignored, so any API key works. That also means
-there is still no authentication, see the warning above.
+With `--auth`, the `Authorization: Bearer <KEY>` header must contain one configured
+key. Missing, invalid, and duplicate Authorization headers return 401.
 
 ### SillyTavern
 

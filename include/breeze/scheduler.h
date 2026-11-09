@@ -1,3 +1,4 @@
+// Modified by WhiteCloudOL to queue slot reservations in FIFO order.
 #pragma once
 
 #include "breeze/generation.h"
@@ -25,10 +26,12 @@ public:
     int parallel() const { return m_parallel; }
     GenPool & pool() { return m_pool; }
 
-    // a request holds slots for as long as it generates, try fails when too few are free
+    // Reservations are FIFO. Cancellation returns false without taking slots.
     bool try_acquire(int n = 1);
-    void acquire(int n = 1);
+    bool acquire(int n = 1, const std::function<bool()> & cancelled = {});
     void release(int n = 1);
+    struct QueueStatus { int active; size_t waiting; int capacity; };
+    QueueStatus queue_status();
 
     // cfg runs every frame twice, so a stream with it costs what two without it do
     int cost(float cfg_scale) const { return cfg_scale != 1.0f && m_parallel > 1 ? 2 : 1; }
@@ -66,6 +69,8 @@ private:
     std::mutex m_slot_mu;
     std::condition_variable m_slot_cv;
     int m_slots = 0;
+    std::list<int> m_slot_waiters;
+    bool m_slots_stopped = true;
 
     std::mutex m_mu;
     std::condition_variable m_cv;
@@ -74,6 +79,16 @@ private:
     std::list<Entry *> m_active;
     bool m_stop = false;
     std::thread m_thread;
+};
+
+// Holds an already acquired reservation until its response or operation finishes.
+struct SlotHold {
+    GenScheduler & sched;
+    int n;
+    SlotHold(GenScheduler & scheduler, int count) : sched(scheduler), n(count) {}
+    ~SlotHold() { sched.release(n); }
+    SlotHold(const SlotHold &) = delete;
+    SlotHold & operator=(const SlotHold &) = delete;
 };
 
 }

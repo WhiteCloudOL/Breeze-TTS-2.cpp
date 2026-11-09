@@ -1,3 +1,4 @@
+// Modified by WhiteCloudOL to expose non-consuming client disconnect checks.
 //
 //  httplib.h
 //
@@ -624,6 +625,7 @@ struct Request {
   // for server
   std::string version;
   std::string target;
+  std::function<bool()> is_connection_closed = [] { return false; };
   MultipartFormDataMap files;
   Ranges ranges;
   Match matches;
@@ -7050,6 +7052,10 @@ Server::process_request(Stream &strm, const std::string &remote_addr,
   if (!line_reader.getline()) { return false; }
 
   Request req;
+  const auto request_socket = strm.socket();
+  req.is_connection_closed = [request_socket] {
+    return !detail::is_socket_alive(request_socket);
+  };
 
   Response res;
   res.version = "HTTP/1.1";

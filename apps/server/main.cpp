@@ -1,3 +1,4 @@
+// Modified by WhiteCloudOL to add optional multi-key authentication and CUDA checks.
 #include "server.h"
 
 #include <cstdio>
@@ -13,6 +14,10 @@ int main(int argc, char ** argv) {
         printf("                     [--voices-dir PATH] [--ws-port P] [--split-chars N]\n");
         printf("                     [--cors [ORIGINS]] [--no-warmup] [--parallel N]\n");
         printf("                     [--talk] [--llm URL] [--tyger URL]\n");
+        printf("                     [--auth] [--api-key-file PATH] [--require-cuda]\n");
+        printf("  --auth         require Bearer keys from BREEZE_API_KEYS, BREEZE_API_KEY, or a key file\n");
+        printf("  --api-key-file UTF-8/UTF-16/UTF-32 file, one key per line (default .env.api-key)\n");
+        printf("  --require-cuda fail startup if a CUDA backend is unavailable\n");
         printf("\n");
         printf("  --chunk-first  fewest frames in the first streamed chunk, lower starts sooner (default 1).\n");
         printf("                 it goes up by itself when the gpu is too busy to stay ahead with that few\n");
@@ -30,8 +35,8 @@ int main(int argc, char ** argv) {
         printf("  --te-cpu       run the text encoder on the cpu, saving about 1 gb of video memory for\n");
         printf("                 about 0.7 s more before each piece of text. dont use it with --parallel,\n");
         printf("                 it pauses the other streams\n");
-        printf("  --parallel N   streams generating at once (default 1), more than that get told the\n");
-        printf("                 server is busy. a stream using cfg counts as two\n");
+        printf("  --parallel N   generation slots (default 1), additional requests wait in FIFO order\n");
+        printf("                 a stream using cfg counts as two when parallel is greater than 1\n");
         printf("  --talk         serve the voice call demo at /talk, needs tyger-server and an llm\n");
         printf("  --llm URL      openai compatible server the demo gets its replies from, passed\n");
         printf("                 through under /llm/ (default http://127.0.0.1:1234/v1 with --talk)\n");
@@ -51,6 +56,9 @@ int main(int argc, char ** argv) {
         else if (a == "--voices-dir" && i + 1 < argc) opts.voices_dir = argv[++i];
         else if (a == "--ws-port" && i + 1 < argc) opts.ws_port = atoi(argv[++i]);
         else if (a == "--cpu") opts.use_gpu = false;
+        else if (a == "--auth") opts.auth = true;
+        else if (a == "--api-key-file" && i + 1 < argc) opts.api_key_file = argv[++i];
+        else if (a == "--require-cuda") opts.require_cuda = true;
         else if (a == "--te-cpu") opts.te_cpu = true;
         else if (a == "--chunk-first" && i + 1 < argc) opts.chunk_first = atoi(argv[++i]);
         else if (a == "--chunk-max" && i + 1 < argc) opts.chunk_max = atoi(argv[++i]);

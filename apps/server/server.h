@@ -1,3 +1,4 @@
+// Modified by WhiteCloudOL to add authentication and explicit CUDA requirements.
 #pragma once
 
 #include <string>
@@ -9,6 +10,9 @@ struct ServerOptions {
     std::string host = "127.0.0.1";
     int port = 8080;
     bool use_gpu = true;
+    bool require_cuda = false;
+    bool auth = false;
+    std::string api_key_file = ".env.api-key";
     bool te_cpu = false;
     bool webui = false;
     bool verbose = false;

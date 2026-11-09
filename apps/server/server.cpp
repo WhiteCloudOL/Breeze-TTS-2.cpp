@@ -1,4 +1,7 @@
+// Modified by WhiteCloudOL to authenticate HTTP and WebSocket requests.
 #include "server.h"
+#include "auth.h"
+#include "queue.h"
 #include "encode.h"
 #include "openai.h"
 #include "voices.h"
@@ -18,6 +21,7 @@
 #include <windows.h> // after httplib, it pulls in winsock2 first
 #endif
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <memory>
@@ -73,14 +77,6 @@ static std::string cors_origin(const std::string & allowed, const httplib::Reque
     return "";
 }
 
-// gives the slot back when the response is finished, the stream outlives the handler
-struct SlotHold {
-    GenScheduler & sched;
-    int n;
-    SlotHold(GenScheduler & s, int count) : sched(s), n(count) {}
-    ~SlotHold() { sched.release(n); }
-};
-
 // one generation with the console progress bar, emit gets each decoded chunk and false stops it
 static void run_generation(BreezeModel & model, MimiCodec & codec, GenScheduler & sched, const GenRequest & g, int sr,
                            bool verbose, const AudioCallback & emit) {
@@ -130,6 +126,13 @@ int run_server(const ServerOptions & opts) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); // otherwise the bar glyphs and any chinese text come out as mojibake
 #endif
+    BearerAuth auth;
+    try {
+        auth = BearerAuth::load(opts.auth, opts.api_key_file);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "authentication configuration error: %s\n", e.what());
+        return 1;
+    }
     BreezeModel model;
     printf("loading %s ...\n", opts.model.c_str());
     if (!model.load(opts.model, opts.use_gpu, opts.te_cpu)) {
@@ -137,6 +140,10 @@ int run_server(const ServerOptions & opts) {
         return 1;
     }
     printf("backend: %s, sample rate: %d\n", model.backend.name(), model.cfg.sample_rate);
+    if (opts.require_cuda && std::string(model.backend.name()).find("CUDA") != 0) {
+        fprintf(stderr, "A CUDA backend is required. Check the CUDA build and NVIDIA driver.\n");
+        return 1;
+    }
     MimiCodec codec;
     codec.init(model);
     if (opts.warmup) {
@@ -167,6 +174,26 @@ int run_server(const ServerOptions & opts) {
     if (opts.parallel > 1) printf("up to %d streams at once\n", opts.parallel);
 
     httplib::Server svr;
+    svr.set_pre_routing_handler([&](const httplib::Request & req, httplib::Response & res) {
+        static const std::vector<std::string> public_paths = {
+            "/", "/style.css", "/app.js", "/docs", "/redoc", "/openapi.json",
+            "/talk", "/talk.css", "/talk.js"
+        };
+        const bool public_page = (req.method == "GET" || req.method == "HEAD") &&
+            std::find(public_paths.begin(), public_paths.end(), req.path) != public_paths.end();
+        // CORS preflight carries no credentials and cannot run a business route.
+        if (public_page || (req.method == "OPTIONS" && !opts.cors.empty()))
+            return httplib::Server::HandlerResponse::Unhandled;
+        std::vector<std::string> credentials;
+        const auto range = req.headers.equal_range("Authorization");
+        for (auto it = range.first; it != range.second; ++it) credentials.push_back(it->second);
+        if (auth.accepts(credentials)) return httplib::Server::HandlerResponse::Unhandled;
+        res.status = 401;
+        res.set_header("WWW-Authenticate", "Bearer");
+        res.set_header("Connection", "close");
+        res.set_content("{\"detail\":\"Invalid or missing API key.\"}", "application/json");
+        return httplib::Server::HandlerResponse::Handled;
+    });
     const int sr = model.cfg.sample_rate;
 
     VoiceStore store;
@@ -178,7 +205,7 @@ int run_server(const ServerOptions & opts) {
     if (ws_port > 0) {
         const bool up = ws.start(opts.host, ws_port, [&](WsConn & c) {
             ws_connection(c, model, codec, store, sched, opts.chunk_first, opts.chunk_max, opts.split_chars);
-        });
+        }, auth);
         if (up) printf("websocket on ws://%s:%d\n", opts.host.c_str(), ws_port);
         else fprintf(stderr, "could not open the websocket port %d\n", ws_port);
     }
@@ -187,6 +214,56 @@ int run_server(const ServerOptions & opts) {
         res.set_content("{\"status\":\"ok\",\"sample_rate\":" + std::to_string(sr) +
                         ",\"ws_port\":" + std::to_string(ws_port > 0 ? ws_port : 0) + "}",
                         "application/json");
+    });
+
+    svr.Get("/v1/model", [&](const httplib::Request &, httplib::Response & res) {
+        res.set_content("{\"model\":\"breeze-tts-2\",\"backend\":" +
+                        json_quote(model.backend.name()) + ",\"sample_rate\":" +
+                        std::to_string(sr) + "}", "application/json");
+    });
+    svr.Get("/v1/queue", [&](const httplib::Request &, httplib::Response & res) {
+        const auto status = sched.queue_status();
+        res.set_content("{\"active\":" + std::to_string(status.active) +
+                        ",\"waiting\":" + std::to_string(status.waiting) +
+                        ",\"capacity\":" + std::to_string(status.capacity) + "}", "application/json");
+    });
+
+    svr.Get("/docs", [](const httplib::Request &, httplib::Response & res) {
+        res.set_content(R"HTML(<!doctype html><html><head><meta charset="utf-8">
+<title>Breeze API</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+</head><body><div id="swagger-ui"></div>
+<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+<script>SwaggerUIBundle({url:"/openapi.json",dom_id:"#swagger-ui"});</script></body></html>)HTML",
+                        "text/html; charset=utf-8");
+    });
+    svr.Get("/redoc", [](const httplib::Request &, httplib::Response & res) {
+        res.set_redirect("/docs");
+    });
+    svr.Get("/openapi.json", [&](const httplib::Request &, httplib::Response & res) {
+        std::string schema = R"JSON({
+  "openapi":"3.0.3","info":{"title":"Breeze TTS C++ API","version":"1.0"},
+  "components":{"securitySchemes":{"BreezeApiKey":{"type":"http","scheme":"bearer"}}},
+  "paths":{
+    "/health":{"get":{"responses":{"200":{"description":"Healthy"}}}},
+    "/v1/model":{"get":{"responses":{"200":{"description":"Loaded model and backend"}}}},
+    "/v1/queue":{"get":{"responses":{"200":{"description":"Active slots, waiting requests and capacity"}}}},
+    "/v1/voices":{"get":{"responses":{"200":{"description":"Saved voices"}}}},
+    "/v1/audio/speech":{"post":{
+      "requestBody":{"required":true,"content":{
+        "multipart/form-data":{"schema":{"type":"object","required":["text"],"properties":{
+          "text":{"type":"string"},"instruction":{"type":"string"},
+          "ref_audio":{"type":"string","format":"binary"},"ref_text":{"type":"string"},
+          "voice_id":{"type":"string"},"cfg_scale":{"type":"number","default":1},
+          "seed":{"type":"integer","default":42}}}},
+        "application/json":{"schema":{"type":"object","required":["input"],"properties":{
+          "input":{"type":"string"},"instructions":{"type":"string"},
+          "voice":{"type":"string"},"response_format":{"type":"string","enum":["pcm","wav","mp3"]}}}}
+      }},"responses":{"200":{"description":"Streaming audio"},"401":{"description":"Invalid or missing API key"}}}}
+  }
+})JSON";
+        if (auth.enabled()) schema.insert(schema.rfind('}'), ",\"security\":[{\"BreezeApiKey\":[]}]");
+        res.set_content(schema, "application/json");
     });
 
     // openai clients post json to the same path, the form fields keep the native behaviour
@@ -200,11 +277,7 @@ int run_server(const ServerOptions & opts) {
             return;
         }
         const int cost = sched.cost(o.g.cfg_scale);
-        if (!sched.try_acquire(cost)) {
-            res.status = 409;
-            res.set_content(openai_error("busy, every generation slot is taken", "server_error"), "application/json");
-            return;
-        }
+        if (!wait_for_slot(sched, req, res, cost)) return;
         auto slot = std::make_shared<SlotHold>(sched, cost);
         o.g.chunk_first = opts.chunk_first;
         o.g.chunk_max = opts.chunk_max;
@@ -258,11 +331,7 @@ int run_server(const ServerOptions & opts) {
             return;
         }
         const int cost = sched.cost((float) atof(field(req, "cfg_scale", "1.0").c_str()));
-        if (!sched.try_acquire(cost)) {
-            res.status = 409;
-            res.set_content("{\"error\":\"busy\"}", "application/json");
-            return;
-        }
+        if (!wait_for_slot(sched, req, res, cost)) return;
         auto slot = std::make_shared<SlotHold>(sched, cost);
         GenRequest g;
         g.text = field(req, "text", "");
@@ -350,15 +419,8 @@ int run_server(const ServerOptions & opts) {
 
     svr.Post("/v1/audio/convert", [&](const httplib::Request & req, httplib::Response & res) {
         // this one runs for a while and doesnt share a batch, so it needs the whole gpu
-        if (!sched.try_acquire(sched.parallel())) {
-            res.status = 409;
-            res.set_content("{\"error\":\"busy\"}", "application/json");
-            return;
-        }
-        struct AllSlots {
-            GenScheduler & s;
-            ~AllSlots() { s.release(s.parallel()); }
-        } all_slots{sched};
+        if (!wait_for_slot(sched, req, res, sched.parallel())) return;
+        SlotHold all_slots(sched, sched.parallel());
         std::vector<float> src, ref;
         const auto load = [&](const char * name, std::vector<float> & out) {
             if (!req.has_file(name)) return false;

@@ -1,3 +1,4 @@
+# Modified by WhiteCloudOL to build multi-key authentication and its regression test.
 cmake_minimum_required(VERSION 3.19)
 project(breeze_tts_cpp LANGUAGES C CXX)
 
@@ -90,6 +91,13 @@ endfunction()
 
 if(BREEZE_BUILD_TESTS)
     enable_testing()
+    add_executable(breeze-test-auth tests/auth.cpp apps/server/auth.cpp)
+    target_include_directories(breeze-test-auth PRIVATE apps/server)
+    add_test(NAME bearer-auth COMMAND breeze-test-auth)
+    add_executable(breeze-test-queue tests/queue.cpp)
+    target_link_libraries(breeze-test-queue PRIVATE breeze_core)
+    breeze_utf8(breeze-test-queue)
+    add_test(NAME request-queue COMMAND breeze-test-queue)
     add_executable(breeze-test-depth tests/depth_replay.cpp)
     target_link_libraries(breeze-test-depth PRIVATE breeze_core)
     breeze_utf8(breeze-test-depth)
@@ -146,7 +154,7 @@ target_link_libraries(breeze-quantize PRIVATE breeze_core)
 breeze_utf8(breeze-quantize)
 
 if(BREEZE_BUILD_SERVER)
-    add_executable(breeze-server apps/server/main.cpp apps/server/server.cpp apps/server/voices.cpp
+    add_executable(breeze-server apps/server/main.cpp apps/server/server.cpp apps/server/auth.cpp apps/server/voices.cpp
                                  apps/server/ws.cpp apps/server/ws_api.cpp apps/server/openai.cpp
                                  apps/server/encode.cpp apps/server/llm_proxy.cpp)
     add_dependencies(breeze-server breeze_webui)

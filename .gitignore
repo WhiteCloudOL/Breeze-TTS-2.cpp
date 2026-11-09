@@ -1,3 +1,4 @@
+# Modified by WhiteCloudOL to exclude local authentication credentials.
 # Prerequisites
 *.d
 
@@ -64,5 +65,7 @@ voices/
 /.agents
 /.claude
 skills-lock.json
+.env*
+*.log
 result
 mcp

@@ -1,4 +1,6 @@
+// Modified by WhiteCloudOL to queue reference encoding and release slots on exceptions.
 #include "voices.h"
+#include "queue.h"
 #include "json.h"
 
 #include "breeze/audio.h"
@@ -224,12 +226,12 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
         if (pcm.empty()) return fail(res, 400, "could not read ref_audio");
 
         // encoding runs on the same device generation does, so it waits its turn
-        if (!sched.try_acquire()) return fail(res, 409, "busy");
+        if (!wait_for_slot(sched, req, res)) return;
+        SlotHold slot(sched, 1);
 
         v.text = text;
         const auto t0 = std::chrono::steady_clock::now();
         sched.exec([&] { v.codes = codec.encode(pcm, v.frames); });
-        sched.release();
         v.encode_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
         if (!name.empty()) {

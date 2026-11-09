@@ -1,4 +1,6 @@
+// Modified by WhiteCloudOL to authenticate WebSocket upgrade requests.
 #pragma once
+#include "auth.h"
 
 #include <atomic>
 #include <cstdint>
@@ -42,7 +44,7 @@ public:
     using Handler = std::function<void(WsConn &)>;
 
     ~WsServer();
-    bool start(const std::string & host, int port, Handler h);
+    bool start(const std::string & host, int port, Handler h, const BearerAuth & auth = BearerAuth());
     void stop();
 
 private:
@@ -50,6 +52,7 @@ private:
 
     uint64_t m_listen = 0;
     Handler m_handler;
+    BearerAuth m_auth;
     std::thread m_thread;
     std::atomic<bool> m_running{false};
 };
