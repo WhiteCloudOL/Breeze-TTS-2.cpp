@@ -20,6 +20,7 @@ try {
     if ($Help) {
         Write-Host 'Options: -BindAddress ADDRESS -Port PORT -WsPort PORT -ModelPath FILE -KeyFile FILE -Parallel N -NoWebUI'
         Write-Host 'Default HTTP ports: auth 7863, original 7865. WebSocket uses HTTP port + 1.'
+        Write-Host 'Default generation slots: 1. Additional requests wait in FIFO order.'
         Write-Host 'Auth keys: BREEZE_API_KEYS, BREEZE_API_KEY, BREEZE_API_KEY_FILE, then .env.api-key (one per line).'
         exit 0
     }
@@ -58,6 +59,7 @@ try {
         $runtimeArguments += @('--auth', '--api-key-file', $KeyFile)
     }
     Write-Host "Starting $Mode Q8_0 API with native CUDA acceleration."
+    Write-Host "Generation slots: $Parallel. Additional requests wait in FIFO order."
     Write-Host "WebUI: http://127.0.0.1:$Port/"
     Write-Host "API docs: http://127.0.0.1:$Port/docs"
     Write-Host 'Wait for the model warmup and listening message. Press Ctrl+C to stop.'

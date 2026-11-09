@@ -15,6 +15,8 @@
 
 在项目目录双击 `start_api_auth.cmd`。等待控制台出现 `backend: CUDA0`、预热完成及 `listening on` 消息。
 
+两个启动脚本默认使用 `Parallel 1`，同一时间处理一条请求，其余请求按 FIFO 排队。启动日志会显示 `Generation slots: 1`。
+
 | 入口 | HTTP | WebSocket |
 | --- | --- | --- |
 | `start_api_auth.cmd` | `127.0.0.1:7863` | `127.0.0.1:7864` |
