@@ -340,6 +340,30 @@ character can see it, with a chat model that takes images. See
 Use `--auth` to protect both listeners with API keys. The Windows auth launcher
 configures this automatically. See [Windows deployment](docs/windows-auth.md).
 
+### New API gateway
+
+[v0.1.7-with-auth.2](https://github.com/WhiteCloudOL/Breeze-TTS-2.cpp/releases/tag/v0.1.7-with-auth.2)
+adds one voice library per New API account. API keys from the same account
+share that library for voice registration, listing, editing, deletion, and synthesis.
+
+1. Create a file of dedicated gateway keys, one per line, using keys distinct
+   from the direct API keys. On Windows, save it as `.env.new-api-key` beside
+   `start_api_auth.cmd` and start or restart with that launcher. For a manual
+   launch, set `BREEZE_GATEWAY_API_KEY_FILE` to the file path and pass `--auth`.
+2. In New API, bind the `breeze-tts` task plugin to a channel, set its Base URL
+   to the private BreezeTTS address reachable from New API (ending in `/v1`),
+   and enter one of the dedicated keys as the channel API key. Enable model
+   `breeze-tts-2` for the groups that may use it.
+3. Relay clients use the New API Base URL and a New API-issued key that permits
+   `breeze-tts-2`. Voice management is under `/v1/voices` and synthesis is at
+   `/v1/audio/speech`.
+
+The launcher reads `.env.new-api-key` on the BreezeTTS machine. New API reads
+its copy of the key from the channel configuration. Direct clients keep their
+original BreezeTTS URL and direct key, such as one from `.env.api-key`. Existing
+saved voices stay in the direct library. To use a voice from a New API account,
+register its reference audio with that account. See [Saved voices](docs/voices.md#new-api-gateway).
+
 ## MCP server
 
 [breeze-tts-2-mcp](https://github.com/fortesoft-co/breeze-tts-2-mcp) is an MCP server that gives
