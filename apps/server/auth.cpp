@@ -128,6 +128,18 @@ bool BearerAuth::accepts(const std::vector<std::string> & authorization) const {
     return valid;
 }
 
+BearerAuth BearerAuth::load_gateway(const BearerAuth & direct) {
+    const char * path = std::getenv("BREEZE_GATEWAY_API_KEY_FILE");
+    if (!direct.enabled() || !path || !*path) return BearerAuth();
+    auto keys = split_keys(read_keys(path), '\n');
+    if (keys.empty()) throw std::runtime_error("The gateway key file must contain at least one API key.");
+    for (const auto & key : keys) {
+        if (direct.accepts({"Bearer " + key}))
+            throw std::runtime_error("Gateway API keys must differ from direct API keys.");
+    }
+    return BearerAuth(std::move(keys));
+}
+
 bool BearerAuth::accepts_websocket(const std::vector<std::string> & authorization,
                                    const std::vector<std::string> & protocols,
                                    std::string & selected_protocol) const {

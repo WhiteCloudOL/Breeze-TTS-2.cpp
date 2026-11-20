@@ -34,7 +34,9 @@ if(MINGW)
     set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
 endif()
 # msvc builds ggml as dlls, they have to land next to the exes
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+endif()
 add_subdirectory(third_party/ggml)
 
 set(BREEZE_SOURCES

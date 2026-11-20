@@ -9,6 +9,7 @@ namespace breeze {
 class BearerAuth {
 public:
     static BearerAuth load(bool enabled, const std::string & key_file);
+    static BearerAuth load_gateway(const BearerAuth & direct);
     explicit BearerAuth(std::vector<std::string> keys = {});
     bool enabled() const { return !m_keys.empty(); }
     bool accepts(const std::vector<std::string> & authorization) const;

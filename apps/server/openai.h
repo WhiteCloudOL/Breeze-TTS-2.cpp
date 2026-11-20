@@ -17,7 +17,7 @@ struct OpenAiSpeech {
 
 // reads an openai style speech body. returns the error message and sets status, empty when it parsed
 std::string parse_openai_speech(const std::string & body, VoiceStore & store, int split_chars,
-                                OpenAiSpeech & out, int & status);
+                                OpenAiSpeech & out, int & status, const std::string & scope);
 
 std::string openai_error(const std::string & msg, const char * type = "invalid_request_error");
 

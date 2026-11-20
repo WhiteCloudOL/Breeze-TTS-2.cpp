@@ -85,7 +85,7 @@ std::string base64(const std::string & in) {
 } // namespace
 
 std::string parse_openai_speech(const std::string & body, VoiceStore & store, int split_chars,
-                                OpenAiSpeech & out, int & status) {
+                                OpenAiSpeech & out, int & status, const std::string & scope) {
     status = 400;
     JVal root;
     if (!JParser(body).parse(root) || root.kind != JVal::Obj) return "request body must be a json object";
@@ -108,7 +108,7 @@ std::string parse_openai_speech(const std::string & body, VoiceStore & store, in
     // sillytavern splits its voice list on bare commas, so "a, b" sends " b"
     const size_t vb = out.voice.find_first_not_of(" \t"), ve = out.voice.find_last_not_of(" \t");
     out.voice = vb == std::string::npos ? "" : out.voice.substr(vb, ve - vb + 1);
-    if (!out.voice.empty() && !store.take(out.voice, g.ref_codes, g.ref_frames, g.ref_text)) {
+    if (!out.voice.empty() && !store.take(out.voice, g.ref_codes, g.ref_frames, g.ref_text, scope)) {
         status = 404;
         return "voice '" + out.voice + "' is not a saved voice. register one with POST /v1/voices, "
                "or leave voice out to design one from instructions";

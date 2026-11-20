@@ -126,9 +126,10 @@ int run_server(const ServerOptions & opts) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8); // otherwise the bar glyphs and any chinese text come out as mojibake
 #endif
-    BearerAuth auth;
+    BearerAuth auth, gateway_auth;
     try {
         auth = BearerAuth::load(opts.auth, opts.api_key_file);
+        gateway_auth = BearerAuth::load_gateway(auth);
     } catch (const std::exception & e) {
         fprintf(stderr, "authentication configuration error: %s\n", e.what());
         return 1;
@@ -187,7 +188,9 @@ int run_server(const ServerOptions & opts) {
         std::vector<std::string> credentials;
         const auto range = req.headers.equal_range("Authorization");
         for (auto it = range.first; it != range.second; ++it) credentials.push_back(it->second);
-        if (auth.accepts(credentials)) return httplib::Server::HandlerResponse::Unhandled;
+        const bool gateway = !voice_scope(req).empty();
+        if (gateway ? gateway_auth.enabled() && gateway_auth.accepts(credentials) : auth.accepts(credentials))
+            return httplib::Server::HandlerResponse::Unhandled;
         res.status = 401;
         res.set_header("WWW-Authenticate", "Bearer");
         res.set_header("Connection", "close");
@@ -198,7 +201,8 @@ int run_server(const ServerOptions & opts) {
 
     VoiceStore store;
     store.load_dir(opts.voices_dir, model.cfg.num_codebooks);
-    store.add_routes(svr, model, codec, sched, opts.voices_dir);
+    if (gateway_auth.enabled()) store.load_gateway_dir(opts.voices_dir, model.cfg.num_codebooks);
+    store.add_routes(svr, model, codec, sched, opts.voices_dir, gateway_auth.enabled());
 
     WsServer ws;
     const int ws_port = opts.ws_port == 0 ? opts.port + 1 : opts.ws_port;
@@ -210,23 +214,32 @@ int run_server(const ServerOptions & opts) {
         else fprintf(stderr, "could not open the websocket port %d\n", ws_port);
     }
 
-    svr.Get("/health", [&](const httplib::Request &, httplib::Response & res) {
+    const auto health = [&](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\",\"sample_rate\":" + std::to_string(sr) +
                         ",\"ws_port\":" + std::to_string(ws_port > 0 ? ws_port : 0) + "}",
                         "application/json");
-    });
+    };
 
-    svr.Get("/v1/model", [&](const httplib::Request &, httplib::Response & res) {
+    const auto model_info = [&](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"model\":\"breeze-tts-2\",\"backend\":" +
                         json_quote(model.backend.name()) + ",\"sample_rate\":" +
                         std::to_string(sr) + "}", "application/json");
-    });
-    svr.Get("/v1/queue", [&](const httplib::Request &, httplib::Response & res) {
+    };
+    const auto queue_info = [&](const httplib::Request &, httplib::Response & res) {
         const auto status = sched.queue_status();
         res.set_content("{\"active\":" + std::to_string(status.active) +
                         ",\"waiting\":" + std::to_string(status.waiting) +
                         ",\"capacity\":" + std::to_string(status.capacity) + "}", "application/json");
-    });
+    };
+    svr.Get("/health", health);
+    svr.Get("/v1/model", model_info);
+    svr.Get("/v1/queue", queue_info);
+    if (gateway_auth.enabled()) {
+        const std::string prefix = gateway_voice_route;
+        svr.Get(prefix + "/health", health);
+        svr.Get(prefix + "/v1/model", model_info);
+        svr.Get(prefix + "/v1/queue", queue_info);
+    }
 
     svr.Get("/docs", [](const httplib::Request &, httplib::Response & res) {
         res.set_content(R"HTML(<!doctype html><html><head><meta charset="utf-8">
@@ -270,7 +283,7 @@ int run_server(const ServerOptions & opts) {
     const auto speak_openai = [&](const httplib::Request & req, httplib::Response & res) {
         OpenAiSpeech o;
         int status = 200;
-        const std::string err = parse_openai_speech(req.body, store, opts.split_chars, o, status);
+        const std::string err = parse_openai_speech(req.body, store, opts.split_chars, o, status, voice_scope(req));
         if (!err.empty()) {
             res.status = status;
             res.set_content(openai_error(err), "application/json");
@@ -325,11 +338,12 @@ int run_server(const ServerOptions & opts) {
             });
     };
 
-    svr.Post("/v1/audio/speech", [&](const httplib::Request & req, httplib::Response & res) {
+    const auto speech = [&](const httplib::Request & req, httplib::Response & res) {
         if (req.get_header_value("Content-Type").find("json") != std::string::npos) {
             speak_openai(req, res);
             return;
         }
+        const std::string scope = voice_scope(req);
         const int cost = sched.cost((float) atof(field(req, "cfg_scale", "1.0").c_str()));
         if (!wait_for_slot(sched, req, res, cost)) return;
         auto slot = std::make_shared<SlotHold>(sched, cost);
@@ -355,7 +369,7 @@ int run_server(const ServerOptions & opts) {
                 // the codec (which is most of the pre-audio wait), and identical seeds give
                 // byte identical audio either way
                 const std::string key = voice_key(f.content, g.ref_text);
-                if (!store.take(key, g.ref_codes, g.ref_frames, g.ref_text)) {
+                if (!store.take(key, g.ref_codes, g.ref_frames, g.ref_text, scope)) {
                     std::vector<float> pcm;
                     if (read_wav_buffer((const uint8_t *) f.content.data(), f.content.size(), sr, pcm) && !pcm.empty()) {
                         CachedVoice v;
@@ -367,7 +381,7 @@ int run_server(const ServerOptions & opts) {
                         fflush(stdout);
                         g.ref_codes = v.codes;
                         g.ref_frames = v.frames;
-                        store.put(key, std::move(v));
+                        store.put(key, std::move(v), scope);
                     }
                 } else {
                     printf("ref %s: cache hit, %d frames, encode skipped\n", key.c_str(), g.ref_frames);
@@ -384,7 +398,7 @@ int run_server(const ServerOptions & opts) {
             }
         }
         const std::string vid = field(req, "voice_id", "");
-        if (!vid.empty() && !store.take(vid, g.ref_codes, g.ref_frames, g.ref_text)) {
+        if (!vid.empty() && !store.take(vid, g.ref_codes, g.ref_frames, g.ref_text, scope)) {
             res.status = 404;
             res.set_content("{\"error\":\"unknown voice_id\"}", "application/json");
             return;
@@ -415,7 +429,9 @@ int run_server(const ServerOptions & opts) {
                 sink.done();
                 return true;
             });
-    });
+    };
+    svr.Post("/v1/audio/speech", speech);
+    if (gateway_auth.enabled()) svr.Post(std::string(gateway_voice_route) + "/v1/audio/speech", speech);
 
     svr.Post("/v1/audio/convert", [&](const httplib::Request & req, httplib::Response & res) {
         // this one runs for a while and doesnt share a batch, so it needs the whole gpu

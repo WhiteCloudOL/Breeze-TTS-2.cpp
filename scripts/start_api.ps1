@@ -8,6 +8,7 @@ param(
     [int]$WsPort = 0,
     [string]$ModelPath = '',
     [string]$KeyFile = '',
+    [string]$ServerPath = '',
     [ValidateRange(1, 32)]
     [int]$Parallel = 1,
     [switch]$NoWebUI,
@@ -18,14 +19,15 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 try {
     if ($Help) {
-        Write-Host 'Options: -BindAddress ADDRESS -Port PORT -WsPort PORT -ModelPath FILE -KeyFile FILE -Parallel N -NoWebUI'
+        Write-Host 'Options: -BindAddress ADDRESS -Port PORT -WsPort PORT -ModelPath FILE -KeyFile FILE -ServerPath FILE -Parallel N -NoWebUI'
         Write-Host 'Default HTTP ports: auth 7863, original 7865. WebSocket uses HTTP port + 1.'
         Write-Host 'Default generation slots: 1. Additional requests wait in FIFO order.'
         Write-Host 'Auth keys: BREEZE_API_KEYS, BREEZE_API_KEY, BREEZE_API_KEY_FILE, then .env.api-key (one per line).'
+        Write-Host 'Optional gateway keys: BREEZE_GATEWAY_API_KEY_FILE, then .env.new-api-key (one per line).'
         exit 0
     }
     Set-Location -LiteralPath $repoRoot
-    $server = Join-Path $repoRoot 'build-cuda\breeze-server.exe'
+    $server = if ($ServerPath) { (Resolve-Path -LiteralPath $ServerPath).Path } else { Join-Path $repoRoot 'build-cuda\breeze-server.exe' }
     if (-not (Test-Path -LiteralPath $server -PathType Leaf)) {
         throw 'Run powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 first.'
     }
@@ -44,6 +46,10 @@ try {
         '--ws-port', $WsPort.ToString(), '--parallel', $Parallel.ToString(), '--require-cuda')
     if (-not $NoWebUI) { $runtimeArguments += '--webui' }
     if ($Mode -eq 'auth') {
+        $gatewayKeyFile = Join-Path $repoRoot '.env.new-api-key'
+        if (-not $env:BREEZE_GATEWAY_API_KEY_FILE -and (Test-Path -LiteralPath $gatewayKeyFile -PathType Leaf)) {
+            $env:BREEZE_GATEWAY_API_KEY_FILE = $gatewayKeyFile
+        }
         if (-not $KeyFile) { $KeyFile = Join-Path $repoRoot '.env.api-key' }
         if (-not $env:BREEZE_API_KEYS -and -not $env:BREEZE_API_KEY -and -not $env:BREEZE_API_KEY_FILE) {
             if (-not (Test-Path -LiteralPath $KeyFile)) {

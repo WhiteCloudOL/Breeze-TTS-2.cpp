@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <algorithm>
+#include <filesystem>
 
 namespace breeze {
 
@@ -120,7 +121,7 @@ static std::string apply_meta(const JVal & root, CachedVoice & v) {
     return "";
 }
 
-void VoiceStore::load_dir(const std::string & dir, int n_codebooks) {
+void VoiceStore::load_dir(const std::string & dir, int n_codebooks, const std::string & scope) {
     for (Voice & v : load_voice_dir(dir)) {
         if (v.n_codebooks != n_codebooks) {
             fprintf(stderr, "voice %s was made for a different model, skipping\n", v.name.c_str());
@@ -133,47 +134,64 @@ void VoiceStore::load_dir(const std::string & dir, int n_codebooks) {
         cv.description = v.description;
         cv.meta = v.meta;
         cv.saved = true;
-        m_voices[v.name] = std::move(cv);
-        m_order.push_back(v.name);
+        auto & library = m_libraries[scope];
+        library.voices[v.name] = std::move(cv);
+        library.order.push_back(v.name);
     }
-    if (!m_order.empty())
-        printf("loaded %d saved voices from %s\n", (int) m_order.size(), dir.c_str());
+    if (auto library = m_libraries.find(scope); library != m_libraries.end())
+        printf("loaded %zu saved voices%s\n", library->second.order.size(), scope.empty() ? "" : " for a gateway user");
+}
+
+void VoiceStore::load_gateway_dir(const std::string & dir, int n_codebooks) {
+    std::error_code ec;
+    for (const auto & entry : std::filesystem::directory_iterator(dir + "/.new-api", ec)) {
+        const auto scope = entry.path().filename().string();
+        if (scope.size() == 64 && scope.find_first_not_of("0123456789abcdef") == std::string::npos &&
+            entry.is_directory(ec) && !entry.is_symlink(ec))
+            load_dir(entry.path().string(), n_codebooks, scope);
+    }
 }
 
 bool VoiceStore::take(const std::string & id, std::vector<int> & codes, int & frames,
-                      std::string & text) {
+                      std::string & text, const std::string & scope) {
     std::lock_guard<std::mutex> vg(m_mutex);
-    auto it = m_voices.find(id);
-    if (it == m_voices.end()) return false;
+    const auto library = m_libraries.find(scope);
+    if (library == m_libraries.end()) return false;
+    const auto it = library->second.voices.find(id);
+    if (it == library->second.voices.end()) return false;
     codes = it->second.codes;
     frames = it->second.frames;
     if (text.empty()) text = it->second.text;
     return true;
 }
 
-void VoiceStore::put(const std::string & id, CachedVoice v) {
+void VoiceStore::put(const std::string & id, CachedVoice v, const std::string & scope) {
     std::lock_guard<std::mutex> vg(m_mutex);
-    if (!m_voices.count(id) && m_order.size() >= max_voices) {
+    m_libraries[scope].put(id, std::move(v));
+}
+
+void VoiceStore::Library::put(const std::string & id, CachedVoice v) {
+    const bool fresh = !voices.count(id);
+    if (fresh && order.size() >= max_voices) {
         // saved voices are not evicted, they were asked for by name
-        for (size_t i = 0; i < m_order.size(); i++) {
-            if (m_voices[m_order[i]].saved) continue;
-            m_voices.erase(m_order[i]);
-            m_order.erase(m_order.begin() + i);
+        for (size_t i = 0; i < order.size(); i++) {
+            if (voices[order[i]].saved) continue;
+            voices.erase(order[i]);
+            order.erase(order.begin() + i);
             break;
         }
     }
-    const bool fresh = !m_voices.count(id);
-    if (fresh) m_order.push_back(id);
-    m_voices[id] = std::move(v);
+    if (fresh) order.push_back(id);
+    voices[id] = std::move(v);
 }
 
 void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCodec & codec,
-                            GenScheduler & sched, const std::string & dir) {
+                            GenScheduler & sched, const std::string & dir, bool gateway_enabled) {
     const int sr = model.cfg.sample_rate;
     const int spf = model.cfg.samples_per_frame;
     const int ncb = model.cfg.num_codebooks;
 
-    auto write_file = [dir, sr, ncb](const std::string & name, const CachedVoice & v) {
+    auto write_file = [dir, sr, ncb](const std::string & scope, const std::string & name, const CachedVoice & v) {
         Voice out;
         out.name = name;
         out.text = v.text;
@@ -183,10 +201,12 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
         out.frames = v.frames;
         out.n_codebooks = ncb;
         out.sample_rate = sr;
-        return save_voice(dir + "/" + name + ".breeze", out);
+        const std::string library_dir = scope.empty() ? dir : dir + "/.new-api/" + scope;
+        return save_voice(library_dir + "/" + name + ".breeze", out);
     };
 
-    svr.Post("/v1/voices", [&, sr, spf, write_file](const httplib::Request & req, httplib::Response & res) {
+    const auto create = [&, sr, spf, write_file](const httplib::Request & req, httplib::Response & res) {
+        const std::string scope = voice_scope(req);
         const std::string text = field(req, "ref_text", "");
         const std::string name = field(req, "name", "");
         if (!req.has_file("ref_audio") || text.empty())
@@ -203,12 +223,10 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
         CachedVoice v;
         {
             std::lock_guard<std::mutex> vg(m_mutex);
-            auto it = m_voices.find(id);
-            if (it != m_voices.end()) {
-                // saving over an existing name keeps its description unless a new one was sent
-                v.description = it->second.description;
-                v.meta = it->second.meta;
-                if (name.empty()) {
+            auto library = m_libraries.find(scope);
+            if (library != m_libraries.end()) {
+                auto it = library->second.voices.find(id);
+                if (it != library->second.voices.end() && name.empty()) {
                     CachedVoice next = it->second;
                     const std::string err = apply_meta(meta, next);
                     if (!err.empty()) return fail(res, 400, err);
@@ -234,66 +252,100 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
         sched.exec([&] { v.codes = codec.encode(pcm, v.frames); });
         v.encode_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
+        std::lock_guard<std::mutex> vg(m_mutex);
+        auto & library = m_libraries[scope];
         if (!name.empty()) {
-            if (!write_file(name, v)) return fail(res, 500, "could not write the voice file");
+            // Merge with the latest metadata under the same lock as PATCH and save.
+            if (auto it = library.voices.find(id); it != library.voices.end()) {
+                v.description = it->second.description;
+                v.meta = it->second.meta;
+                const std::string bad_meta = apply_meta(meta, v);
+                if (!bad_meta.empty()) return fail(res, 400, bad_meta);
+            }
+            if (!write_file(scope, name, v)) return fail(res, 500, "could not write the voice file");
             v.saved = true;
         }
         const std::string body = voice_json(id, v, sr, spf);
         printf("voice %s cached%s, %d frames in %.0f ms\n", id.c_str(),
                v.saved ? " and saved" : "", v.frames, v.encode_ms);
         fflush(stdout);
-        put(id, std::move(v));
+        library.put(id, std::move(v));
         res.set_content(body, "application/json");
-    });
+    };
 
-    svr.Get("/v1/voices", [&, sr, spf](const httplib::Request &, httplib::Response & res) {
+    const auto list = [&, sr, spf](const httplib::Request & req, httplib::Response & res) {
         std::lock_guard<std::mutex> vg(m_mutex);
+        const auto library = m_libraries.find(voice_scope(req));
         std::string out = "[";
-        for (size_t i = 0; i < m_order.size(); i++) {
-            if (i) out += ",";
-            out += voice_json(m_order[i], m_voices[m_order[i]], sr, spf);
+        if (library != m_libraries.end()) {
+            for (const auto & id : library->second.order) {
+                if (out.size() > 1) out += ",";
+                out += voice_json(id, library->second.voices.at(id), sr, spf);
+            }
         }
         res.set_content(out + "]", "application/json");
-    });
+    };
 
-    svr.Get(R"(/v1/voices/(.+))", [&, sr, spf](const httplib::Request & req, httplib::Response & res) {
-        const std::string id = req.matches[1];
+    const auto get = [&, sr, spf](const httplib::Request & req, httplib::Response & res) {
+        const std::string id = req.matches[req.matches.size() - 1];
         std::lock_guard<std::mutex> vg(m_mutex);
-        auto it = m_voices.find(id);
-        if (it == m_voices.end()) return fail(res, 404, "unknown voice_id");
+        const auto library = m_libraries.find(voice_scope(req));
+        if (library == m_libraries.end()) return fail(res, 404, "unknown voice_id");
+        const auto it = library->second.voices.find(id);
+        if (it == library->second.voices.end()) return fail(res, 404, "unknown voice_id");
         res.set_content(voice_json(id, it->second, sr, spf), "application/json");
-    });
+    };
 
-    svr.Patch(R"(/v1/voices/(.+))", [&, sr, spf, write_file](const httplib::Request & req, httplib::Response & res) {
-        const std::string id = req.matches[1];
+    const auto patch = [&, sr, spf, write_file](const httplib::Request & req, httplib::Response & res) {
+        const std::string scope = voice_scope(req);
+        const std::string id = req.matches[req.matches.size() - 1];
+        std::lock_guard<std::mutex> vg(m_mutex);
+        const auto library = m_libraries.find(scope);
+        if (library == m_libraries.end()) return fail(res, 404, "unknown voice_id");
+        const auto it = library->second.voices.find(id);
+        if (it == library->second.voices.end()) return fail(res, 404, "unknown voice_id");
         JVal meta;
         std::string err = read_meta_request(req, meta);
         if (!err.empty()) return fail(res, 400, err);
-        std::lock_guard<std::mutex> vg(m_mutex);
-        auto it = m_voices.find(id);
-        if (it == m_voices.end()) return fail(res, 404, "unknown voice_id");
         CachedVoice next = it->second;
         err = apply_meta(meta, next);
         if (!err.empty()) return fail(res, 400, err);
-        if (next.saved && !write_file(id, next)) return fail(res, 500, "could not write the voice file");
+        if (next.saved && !write_file(scope, id, next)) return fail(res, 500, "could not write the voice file");
         it->second = std::move(next);
         printf("voice %s metadata updated%s\n", id.c_str(), it->second.saved ? " and saved" : "");
         fflush(stdout);
         res.set_content(voice_json(id, it->second, sr, spf), "application/json");
-    });
+    };
 
-    svr.Delete(R"(/v1/voices/(.+))", [&](const httplib::Request & req, httplib::Response & res) {
-        const std::string id = req.matches[1];
+    const auto remove = [&](const httplib::Request & req, httplib::Response & res) {
+        const std::string id = req.matches[req.matches.size() - 1];
         std::lock_guard<std::mutex> vg(m_mutex);
-        auto it = m_voices.find(id);
-        if (it == m_voices.end()) return fail(res, 404, "unknown voice_id");
+        const auto library = m_libraries.find(voice_scope(req));
+        if (library == m_libraries.end()) return fail(res, 404, "unknown voice_id");
+        auto & voices = library->second.voices;
+        auto & order = library->second.order;
+        const auto it = voices.find(id);
+        if (it == voices.end()) return fail(res, 404, "unknown voice_id");
         // the file stays put, deleting one over http would be a nasty way to lose a voice
         const bool saved = it->second.saved;
-        m_voices.erase(it);
-        m_order.erase(std::remove(m_order.begin(), m_order.end(), id), m_order.end());
+        voices.erase(it);
+        order.erase(std::remove(order.begin(), order.end(), id), order.end());
+        if (voices.empty()) m_libraries.erase(library);
         res.set_content(std::string("{\"deleted\":\"") + json_escape(id) + "\",\"file_kept\":" +
                         (saved ? "true" : "false") + "}", "application/json");
-    });
+    };
+
+    const auto register_routes = [&](const std::string & prefix, const std::string & id_pattern) {
+        const auto collection = prefix + "/v1/voices";
+        const auto item = collection + "/" + id_pattern;
+        svr.Post(collection, create);
+        svr.Get(collection, list);
+        svr.Get(item, get);
+        svr.Patch(item, patch);
+        svr.Delete(item, remove);
+    };
+    register_routes("", "(.+)");
+    if (gateway_enabled) register_routes(gateway_voice_route, "([A-Za-z0-9_-]{1,64})");
 }
 
 } // namespace breeze

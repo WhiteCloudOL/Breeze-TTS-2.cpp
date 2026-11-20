@@ -64,6 +64,21 @@ Names allow letters, digits, dash and underscore, up to 64 characters. They
 become filenames, so anything looser would let a request write outside the
 folder.
 
+### New API gateway
+
+In authenticated mode, set `BREEZE_GATEWAY_API_KEY_FILE` to a file containing
+dedicated gateway keys, one per line. The Windows auth launcher also checks
+`.env.new-api-key` next to the launcher. Use a distinct key for the New API
+channel and keep the gateway path behind a private connection. Direct clients
+continue to use `/v1/voices` and `/v1/audio/speech` with their existing keys.
+
+The gateway assigns each authenticated account its own library for listing,
+registration, editing, removal and synthesis. A named voice is saved under
+`<voices-dir>/.new-api/<account-scope>/`; the direct library remains at
+`<voices-dir>/`. Existing voices stay in the direct library. To make one
+available to a gateway account, register its reference audio with that account.
+The same account can use its saved voice from any of its permitted relay keys.
+
 ## Using one
 
 Everywhere a reference clip is accepted, a voice id is accepted instead.

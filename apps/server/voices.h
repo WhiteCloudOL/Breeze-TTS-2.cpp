@@ -23,6 +23,15 @@ inline std::string field(const httplib::Request & req, const char * name, const 
 // hash of the clip bytes and its transcript; the id unnamed reference clips are cached under
 std::string voice_key(const std::string & wav, const std::string & text);
 
+inline constexpr char gateway_voice_prefix[] = "/new-api/";
+inline constexpr char gateway_voice_route[] = "/new-api/([a-f0-9]{64})";
+
+// Private route patterns validate the scope segment before reaching a handler.
+inline std::string voice_scope(const httplib::Request & req) {
+    return req.path.compare(0, sizeof(gateway_voice_prefix) - 1, gateway_voice_prefix) == 0
+        ? req.path.substr(sizeof(gateway_voice_prefix) - 1, 64) : std::string();
+}
+
 struct CachedVoice {
     std::vector<int> codes;
     int frames = 0;
@@ -36,20 +45,26 @@ struct CachedVoice {
 // reference voices the server already encoded, both the ones posted at runtime and the files on disk
 class VoiceStore {
 public:
-    void load_dir(const std::string & dir, int n_codebooks);
+    void load_dir(const std::string & dir, int n_codebooks, const std::string & scope = "");
+    void load_gateway_dir(const std::string & dir, int n_codebooks);
 
     // fills in a cached reference, false only when the id is unknown
-    bool take(const std::string & id, std::vector<int> & codes, int & frames, std::string & text);
+    bool take(const std::string & id, std::vector<int> & codes, int & frames, std::string & text,
+              const std::string & scope = "");
 
     // in memory insert, unnamed entries get evicted oldest first when the table is full
-    void put(const std::string & id, CachedVoice v);
+    void put(const std::string & id, CachedVoice v, const std::string & scope = "");
 
     void add_routes(httplib::Server & svr, BreezeModel & model, MimiCodec & codec, GenScheduler & sched,
-                    const std::string & dir);
+                    const std::string & dir, bool gateway_enabled);
 
 private:
-    std::map<std::string, CachedVoice> m_voices;
-    std::vector<std::string> m_order;
+    struct Library {
+        std::map<std::string, CachedVoice> voices;
+        std::vector<std::string> order;
+        void put(const std::string & id, CachedVoice v);
+    };
+    std::map<std::string, Library> m_libraries;
     std::mutex m_mutex;
     static const size_t max_voices = 64;
 };
