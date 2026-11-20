@@ -45,14 +45,27 @@ static std::string json_escape(const std::string & s) {
     return o;
 }
 
-static std::string voice_json(const std::string & id, const CachedVoice & v, int sr, int spf) {
+static constexpr char direct_voice_prefix[] = "new-api/";
+
+static bool valid_scope(const std::string & scope) {
+    return scope.size() == 64 && scope.find_first_not_of("0123456789abcdef") == std::string::npos;
+}
+
+static std::string direct_voice_name(const std::string & scope, const std::string & id) {
+    return id + " (New API " + scope.substr(0, 8) + ")";
+}
+
+static std::string voice_json(const std::string & id, const CachedVoice & v, int sr, int spf,
+                              const std::string & name = "") {
     char buf[256];
     snprintf(buf, sizeof buf,
-             "{\"id\":\"%s\",\"frames\":%d,\"seconds\":%.2f,\"encode_ms\":%.0f,\"saved\":%s,\"ref_text\":\"",
-             json_escape(id).c_str(), v.frames, (double) v.frames * spf / sr, v.encode_ms,
+             ",\"frames\":%d,\"seconds\":%.2f,\"encode_ms\":%.0f,\"saved\":%s,\"ref_text\":\"",
+             v.frames, (double) v.frames * spf / sr, v.encode_ms,
              v.saved ? "true" : "false");
-    std::string out = std::string(buf) + json_escape(v.text) + "\",\"description\":\"" +
-                      json_escape(v.description) + "\",\"metadata\":{";
+    std::string out = "{\"id\":\"" + json_escape(id) + "\"";
+    if (!name.empty()) out += ",\"name\":\"" + json_escape(name) + "\"";
+    out += std::string(buf) + json_escape(v.text) + "\",\"description\":\"" +
+           json_escape(v.description) + "\",\"metadata\":{";
     bool first = true;
     for (const auto & kv : v.meta) {
         if (!first) out += ",";
@@ -123,6 +136,7 @@ static std::string apply_meta(const JVal & root, CachedVoice & v) {
 
 void VoiceStore::load_dir(const std::string & dir, int n_codebooks, const std::string & scope) {
     for (Voice & v : load_voice_dir(dir)) {
+        if (!scope.empty() && !valid_voice_name(v.name)) continue;
         if (v.n_codebooks != n_codebooks) {
             fprintf(stderr, "voice %s was made for a different model, skipping\n", v.name.c_str());
             continue;
@@ -146,18 +160,31 @@ void VoiceStore::load_gateway_dir(const std::string & dir, int n_codebooks) {
     std::error_code ec;
     for (const auto & entry : std::filesystem::directory_iterator(dir + "/.new-api", ec)) {
         const auto scope = entry.path().filename().string();
-        if (scope.size() == 64 && scope.find_first_not_of("0123456789abcdef") == std::string::npos &&
-            entry.is_directory(ec) && !entry.is_symlink(ec))
+        if (valid_scope(scope) && entry.is_directory(ec) && !entry.is_symlink(ec))
             load_dir(entry.path().string(), n_codebooks, scope);
     }
 }
 
+VoiceStore::VoiceLocation VoiceStore::locate_voice(const std::string & request_scope, const std::string & id) const {
+    constexpr size_t prefix_size = sizeof(direct_voice_prefix) - 1;
+    if (m_direct_can_manage_all && request_scope.empty() && id.compare(0, prefix_size, direct_voice_prefix) == 0) {
+        const size_t separator = id.find('/', prefix_size);
+        if (separator != std::string::npos) {
+            auto scope = id.substr(prefix_size, separator - prefix_size);
+            auto name = id.substr(separator + 1);
+            if (valid_scope(scope) && valid_voice_name(name)) return {std::move(scope), std::move(name)};
+        }
+    }
+    return {request_scope, id};
+}
+
 bool VoiceStore::take(const std::string & id, std::vector<int> & codes, int & frames,
                       std::string & text, const std::string & scope) {
+    const auto location = locate_voice(scope, id);
     std::lock_guard<std::mutex> vg(m_mutex);
-    const auto library = m_libraries.find(scope);
+    const auto library = m_libraries.find(location.scope);
     if (library == m_libraries.end()) return false;
-    const auto it = library->second.voices.find(id);
+    const auto it = library->second.voices.find(location.id);
     if (it == library->second.voices.end()) return false;
     codes = it->second.codes;
     frames = it->second.frames;
@@ -274,35 +301,50 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
     };
 
     const auto list = [&, sr, spf](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Cache-Control", "no-store");
+        const auto scope = voice_scope(req);
         std::lock_guard<std::mutex> vg(m_mutex);
-        const auto library = m_libraries.find(voice_scope(req));
         std::string out = "[";
-        if (library != m_libraries.end()) {
-            for (const auto & id : library->second.order) {
+        const auto append_library = [&](const Library & library, const std::string & owner) {
+            for (const auto & id : library.order) {
                 if (out.size() > 1) out += ",";
-                out += voice_json(id, library->second.voices.at(id), sr, spf);
+                const auto & voice = library.voices.at(id);
+                if (owner.empty()) out += voice_json(id, voice, sr, spf);
+                else out += voice_json(direct_voice_prefix + owner + "/" + id, voice, sr, spf, direct_voice_name(owner, id));
+            }
+        };
+        if (const auto library = m_libraries.find(scope); library != m_libraries.end())
+            append_library(library->second, "");
+        if (m_direct_can_manage_all && scope.empty()) {
+            for (const auto & [owner, library] : m_libraries) {
+                if (!owner.empty()) append_library(library, owner);
             }
         }
         res.set_content(out + "]", "application/json");
     };
 
     const auto get = [&, sr, spf](const httplib::Request & req, httplib::Response & res) {
+        res.set_header("Cache-Control", "no-store");
         const std::string id = req.matches[req.matches.size() - 1];
+        const auto scope = voice_scope(req);
+        const auto location = locate_voice(scope, id);
         std::lock_guard<std::mutex> vg(m_mutex);
-        const auto library = m_libraries.find(voice_scope(req));
+        const auto library = m_libraries.find(location.scope);
         if (library == m_libraries.end()) return fail(res, 404, "unknown voice_id");
-        const auto it = library->second.voices.find(id);
+        const auto it = library->second.voices.find(location.id);
         if (it == library->second.voices.end()) return fail(res, 404, "unknown voice_id");
-        res.set_content(voice_json(id, it->second, sr, spf), "application/json");
+        const auto name = location.scope == scope ? "" : direct_voice_name(location.scope, location.id);
+        res.set_content(voice_json(id, it->second, sr, spf, name), "application/json");
     };
 
     const auto patch = [&, sr, spf, write_file](const httplib::Request & req, httplib::Response & res) {
         const std::string scope = voice_scope(req);
         const std::string id = req.matches[req.matches.size() - 1];
+        const auto location = locate_voice(scope, id);
         std::lock_guard<std::mutex> vg(m_mutex);
-        const auto library = m_libraries.find(scope);
+        const auto library = m_libraries.find(location.scope);
         if (library == m_libraries.end()) return fail(res, 404, "unknown voice_id");
-        const auto it = library->second.voices.find(id);
+        const auto it = library->second.voices.find(location.id);
         if (it == library->second.voices.end()) return fail(res, 404, "unknown voice_id");
         JVal meta;
         std::string err = read_meta_request(req, meta);
@@ -310,26 +352,28 @@ void VoiceStore::add_routes(httplib::Server & svr, BreezeModel & model, MimiCode
         CachedVoice next = it->second;
         err = apply_meta(meta, next);
         if (!err.empty()) return fail(res, 400, err);
-        if (next.saved && !write_file(scope, id, next)) return fail(res, 500, "could not write the voice file");
+        if (next.saved && !write_file(location.scope, location.id, next)) return fail(res, 500, "could not write the voice file");
         it->second = std::move(next);
-        printf("voice %s metadata updated%s\n", id.c_str(), it->second.saved ? " and saved" : "");
+        printf("voice %s metadata updated%s\n", location.id.c_str(), it->second.saved ? " and saved" : "");
         fflush(stdout);
-        res.set_content(voice_json(id, it->second, sr, spf), "application/json");
+        const auto name = location.scope == scope ? "" : direct_voice_name(location.scope, location.id);
+        res.set_content(voice_json(id, it->second, sr, spf, name), "application/json");
     };
 
     const auto remove = [&](const httplib::Request & req, httplib::Response & res) {
         const std::string id = req.matches[req.matches.size() - 1];
+        const auto location = locate_voice(voice_scope(req), id);
         std::lock_guard<std::mutex> vg(m_mutex);
-        const auto library = m_libraries.find(voice_scope(req));
+        const auto library = m_libraries.find(location.scope);
         if (library == m_libraries.end()) return fail(res, 404, "unknown voice_id");
         auto & voices = library->second.voices;
         auto & order = library->second.order;
-        const auto it = voices.find(id);
+        const auto it = voices.find(location.id);
         if (it == voices.end()) return fail(res, 404, "unknown voice_id");
         // the file stays put, deleting one over http would be a nasty way to lose a voice
         const bool saved = it->second.saved;
         voices.erase(it);
-        order.erase(std::remove(order.begin(), order.end(), id), order.end());
+        order.erase(std::remove(order.begin(), order.end(), location.id), order.end());
         if (voices.empty()) m_libraries.erase(library);
         res.set_content(std::string("{\"deleted\":\"") + json_escape(id) + "\",\"file_kept\":" +
                         (saved ? "true" : "false") + "}", "application/json");

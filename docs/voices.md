@@ -74,10 +74,17 @@ continue to use `/v1/voices` and `/v1/audio/speech` with their existing keys.
 
 The gateway assigns each authenticated account its own library for listing,
 registration, editing, removal and synthesis. A named voice is saved under
-`<voices-dir>/.new-api/<account-scope>/`; the direct library remains at
-`<voices-dir>/`. Existing voices stay in the direct library. To make one
-available to a gateway account, register its reference audio with that account.
-The same account can use its saved voice from any of its permitted relay keys.
+`<voices-dir>/.new-api/<account-scope>/`. The same account can use its saved
+voice from any of its permitted relay keys. Existing direct voices remain
+under `<voices-dir>/` and outside the gateway libraries.
+
+With `--auth`, the direct API also lists and manages every gateway account's
+saved and cached voices. Use the `id` returned by `GET /v1/voices` to select an
+entry. Gateway entries have a distinct ID on the direct API so identical names
+across accounts can be used independently. The same ID works for direct
+synthesis and voice management. Direct keys grant this access to trusted
+operators. Gateway keys only grant access to the requested account library.
+The unauthenticated server exposes its original direct library.
 
 ## Using one
 

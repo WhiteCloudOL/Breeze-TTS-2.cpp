@@ -82,7 +82,7 @@ async function loadVoices() {
     for (const v of list) {
       const o = document.createElement("option");
       o.value = v.id;
-      o.textContent = v.id + "  (" + v.seconds.toFixed(1) + "s)" + (v.saved ? "" : "  temporary");
+      o.textContent = (v.name || v.id) + "  (" + v.seconds.toFixed(1) + "s)" + (v.saved ? "" : "  temporary");
       if (v.description) o.title = v.description;
       sel.appendChild(o);
     }
@@ -505,7 +505,7 @@ function el(tag, cls, text) {
 
 function matches(v, q) {
   if (!q) return true;
-  const hay = [v.id, v.description, v.ref_text]
+  const hay = [v.id, v.name, v.description, v.ref_text]
     .concat(Object.entries(v.metadata || {}).map(([k, val]) => k + " " + val))
     .join("\n").toLowerCase();
   return hay.includes(q);
@@ -541,7 +541,7 @@ function fieldRow(box, key, value, onChange) {
 function voiceCard(v) {
   const card = el("div", "vcard");
   const head = el("div", "vhead");
-  head.append(el("span", "vname", v.id), el("span", "vtag", v.seconds.toFixed(1) + "s"),
+  head.append(el("span", "vname", v.name || v.id), el("span", "vtag", v.seconds.toFixed(1) + "s"),
               el("span", "vtag" + (v.saved ? "" : " temp"), v.saved ? "SAVED" : "TEMPORARY"));
   const use = el("button", "ghost", "USE");
   use.title = "pick this voice in the clone tab";

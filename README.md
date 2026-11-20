@@ -359,10 +359,11 @@ share that library for voice registration, listing, editing, deletion, and synth
    `/v1/audio/speech`.
 
 The launcher reads `.env.new-api-key` on the BreezeTTS machine. New API reads
-its copy of the key from the channel configuration. Direct clients keep their
-original BreezeTTS URL and direct key, such as one from `.env.api-key`. Existing
-saved voices stay in the direct library. To use a voice from a New API account,
-register its reference audio with that account. See [Saved voices](docs/voices.md#new-api-gateway).
+its copy of the key from the channel configuration. Starting with
+`v0.1.7-with-auth.3`, a client using a direct key from `.env.api-key` can list,
+manage, and synthesize both direct voices and voices registered by New API
+accounts. Keep the direct keys for trusted operators. Gateway users still see
+only their own voices. See [Saved voices](docs/voices.md#new-api-gateway).
 
 ## MCP server
 

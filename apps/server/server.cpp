@@ -199,9 +199,9 @@ int run_server(const ServerOptions & opts) {
     });
     const int sr = model.cfg.sample_rate;
 
-    VoiceStore store;
+    VoiceStore store(auth.enabled());
     store.load_dir(opts.voices_dir, model.cfg.num_codebooks);
-    if (gateway_auth.enabled()) store.load_gateway_dir(opts.voices_dir, model.cfg.num_codebooks);
+    if (auth.enabled()) store.load_gateway_dir(opts.voices_dir, model.cfg.num_codebooks);
     store.add_routes(svr, model, codec, sched, opts.voices_dir, gateway_auth.enabled());
 
     WsServer ws;

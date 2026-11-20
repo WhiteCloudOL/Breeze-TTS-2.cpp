@@ -1141,7 +1141,7 @@ function set(path, v) {
 
 function voiceOptions(sel) {
   let o = '<option value="">No saved voice (use the description)</option>';
-  for (const v of voices) o += '<option value="' + esc(v.id) + '"' + (v.id === sel ? ' selected' : '') + '>' + esc(v.id) + ' (' + v.seconds.toFixed(1) + ' s)</option>';
+  for (const v of voices) o += '<option value="' + esc(v.id) + '"' + (v.id === sel ? ' selected' : '') + '>' + esc(v.name || v.id) + ' (' + v.seconds.toFixed(1) + ' s)</option>';
   if (sel && !voices.some((v) => v.id === sel)) o += '<option value="' + esc(sel) + '" selected>' + esc(sel) + ' (not on the server)</option>';
   return o;
 }

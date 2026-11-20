@@ -45,6 +45,7 @@ struct CachedVoice {
 // reference voices the server already encoded, both the ones posted at runtime and the files on disk
 class VoiceStore {
 public:
+    explicit VoiceStore(bool direct_can_manage_all = false) : m_direct_can_manage_all(direct_can_manage_all) {}
     void load_dir(const std::string & dir, int n_codebooks, const std::string & scope = "");
     void load_gateway_dir(const std::string & dir, int n_codebooks);
 
@@ -59,6 +60,12 @@ public:
                     const std::string & dir, bool gateway_enabled);
 
 private:
+    struct VoiceLocation {
+        std::string scope;
+        std::string id;
+    };
+    VoiceLocation locate_voice(const std::string & request_scope, const std::string & id) const;
+
     struct Library {
         std::map<std::string, CachedVoice> voices;
         std::vector<std::string> order;
@@ -66,6 +73,7 @@ private:
     };
     std::map<std::string, Library> m_libraries;
     std::mutex m_mutex;
+    const bool m_direct_can_manage_all;
     static const size_t max_voices = 64;
 };
 
